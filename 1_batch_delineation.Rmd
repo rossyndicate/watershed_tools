@@ -45,6 +45,9 @@ knitr::knit_hooks$set(webgl = hook_webgl)
 
 ## Use mapedit to define watershed drainage points
 
+
+https://www.youtube.com/watch?v=YYMgGawNt_A
+
 ```{r,eval=F}
 sites <- editMap() # Generates an interactive map where you can point and
 #click to add sites
