@@ -1,0 +1,401 @@
+---
+title: "Batch Watershed Delineation"
+author: "Matthew Ross"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+
+
+The goal of this tutorial is to start with zero data, use a variety of tools in
+R to dynamically download data, delineate study watersheds, and then visualize
+those watersheds. This workflow is an example of the power of linking a 
+series of packages in R to automate and simplify a process that historically 
+was quite difficult and required moving in and out of terminal, ARCGIS, 
+R, and other tools. 
+
+# Downloading and preparing data
+
+## Lots of packages to load
+
+
+```{r setup,warnings='hide',message=F}
+
+## Install whitebox from github (not available on CRAN as of date above)
+#devtools::install_github("giswqs/whiteboxR")
+
+library(sf) #Amazingly simple tidy GIS R package
+library(mapview) #Interactive mapping of sf objects
+library(mapedit) #Interactive editing of spatial data
+library(rayshader) #Lovely 3D rendering platform
+library(tidyverse) #Good 'ol tidyverse (dplyr, readr, more)
+library(elevatr) #R access to mapzen (dynamic downloading of DEMs)
+library(raster) # Name says it all, rasters in R
+#library(whitebox) # The star of the show, but we don't load it because
+# it overwrites too many base feature names. Just call it with 
+#whitebox:: instead
+library(stars) # A bridge to the future of raster (spatiotemporal objects)
+library(rgl) # Make your watershed grabbable and rotationable
+library(geoviz) # A package that helps visualize rayshader data
+#Embed RGL into html output
+knitr::knit_hooks$set(webgl = hook_webgl)
+```
+
+
+
+## Use mapedit to define watershed drainage points
+
+```{r,eval=F}
+sites <- editMap() # Generates an interactive map where you can point and
+#click to add sites
+
+
+st_write(sites %>% # Transform data to project onto southern WV with epsg code
+           st_transform(32151),'data/sites.shp',delete_layer=T)
+```
+
+
+
+
+
+```{r}
+#Read in site data
+sites <- st_read('data/sites.shp')
+
+## Use elevatr::get_elev_raster to download data. Z sets the resolution 
+# 14 is highest resolution, 1 is lowest
+
+raw_dem <- get_elev_raster(sites,z=12)  
+
+
+#generate a box and check topo basemap for full watershed capture
+bound_box <- st_bbox(raw_dem) %>% st_as_sfc()
+
+
+
+# Double check that we captured the whole watershed (decrease z if you need to 
+#cover a bigger area, though you will lose resolution)
+mapview(bound_box) + 
+  mapview(sites)
+
+
+#Save files so that whitebox can call the data
+writeRaster(raw_dem,filename='data/raw_dem.tif',overwrite=T)
+
+```
+
+
+## Analyze DEM using whitebox
+
+Whitebox is an amazing tool with strong documentation [here](https://jblindsay.github.io/wbt_book/available_tools/hydrological_analysis.html)
+
+```{r}
+#Breach filling
+raw_file <- 'data/raw_dem.tif'
+
+
+
+#Fill single cell pits (for hydrologic correctness)
+whitebox::breach_single_cell_pits(raw_file,'data/breach1.tif')
+
+
+#Breach depressions (better option that pit filling according to whitebox docu
+#mentation) The flat_increment bit was tricky for me and needed to be tuned.
+whitebox::breach_depressions('data/breach1.tif','data/breached.tif',flat_increment=.1)
+
+
+#D8 pointer (what is a pointer? a flow direction grid)
+whitebox::d8_pointer('data/breached.tif','data/d8_pntr.tif')
+
+
+
+#D8 flow accumulation (raster cells fully drain in 1 of 8 directions)
+whitebox::d8_flow_accumulation('data/breached.tif',
+                     'data/d8_flow.tif',
+                     out_type='catchment area',
+                     log=T)
+
+# Dinf flow accumulation (Flow can be partially partitioned to many cells )
+whitebox::d_inf_flow_accumulation('data/breached.tif',
+                        'data/d_inf_flow.tif',
+                        out_type='catchment area',
+                        log=T)
+
+#Snap our hand drawn delineation points to the largest flow accumulation
+# cell within 100m
+whitebox::snap_pour_points('data/sites.shp','data/d8_flow.tif','data/snapped_sites.shp',100)
+
+#Extract the stream network with a threshold of
+whitebox::extract_streams('data/d8_flow.tif',output='data/streams.tif',threshold=11)
+
+
+#Watershed delineation as "whole watersheds' (no sub-watershed netowrk to unpack)
+whitebox::unnest_basins('data/d8_pntr.tif','data/snapped_sites.shp','data/basins/fraser_sheds.tif')
+
+
+```
+
+# Watershed visualization
+
+## Check watershed delineation
+
+```{r}
+#Read in flow accumulation algorithm
+fac <- raster('data/d_inf_flow.tif')
+
+
+#Get a list of the watershed created by `unnest_basins`
+sheds <- list.files('data/basins',full.names=T)
+
+#Create a function that uses the stars package to transform
+# the raster watershed outlines into shapefiles
+shed_stacker <- function(x){
+  read_stars(sheds[x]) %>%
+    st_as_sf(merge=T,use_integer = T) %>%
+    rename(id=1) %>%
+    group_by(id) %>%
+    summarize()
+}
+
+## Use purrr::map to apply the raster-shapefile transformation to all
+## rasters to a list of shapefiles (map_dfr doesn't play nice with sf for 
+## unknown reasons)
+s <- purrr::map(1:length(sheds),shed_stacker)
+
+#Use do.call to bind these sf objects into a single one
+shape_sheds <- do.call('rbind',s) %>% arrange(id)
+
+
+
+#subset flow accumulation
+fac_sub <- crop(fac,shape_sheds)
+
+## Make a map to check if this all makes sense 
+# I expected 3 watersheds of different size and that's
+# what I got
+mapview(shape_sheds) 
+```
+
+
+## Generate 3D plot
+
+This code uses the amazing [rayshader](https://github.com/tylermorganwall/rayshader) package. 
+
+```{r}
+
+#crop and mask elevatr DEM
+clip_dem <- raw_dem %>%
+  crop(.,shape_sheds) %>%
+  mask(.,shape_sheds) %>%
+  raster::aggregate(.,factor=3)
+
+#sampling_points <- mapedit::editMap()
+#Convert to matrix so rayshader is happy
+fmat <- matrix(raster::extract(clip_dem,raster::extent(clip_dem),buffer=100),
+                     nrow=ncol(clip_dem),ncol=nrow(clip_dem))
+
+
+
+#Generate a hillshade
+raymat1 = ray_shade(fmat,sunangle=60)
+
+#use rayshader commands to generate map
+#rglwidget embeds output in html
+fmat %>%
+  sphere_shade(texture='desert') %>%
+  add_shadow(raymat1) %>%
+  plot_3d(fmat,zscale=15,fov=0,theta=135,zoom=0.75,phi=45,
+          windowsize=c(750,750))
+
+
+rglwidget()
+
+```
+
+## Add flow accumulation overlay
+
+The above plot is somewhat difficult to parse without an overlay. So we can add a flow accumulation overlay image. 
+
+
+
+```{r}
+
+
+#Cleanup the flow accumulation subset and match dimensions with DEM
+fac_drape <- fac_sub %>%
+  crop(.,shape_sheds) %>%
+  mask(.,shape_sheds) %>%
+  raster::aggregate(.,factor=3)
+
+
+
+# A bunch of code I don't entirely understand to make a drape over the
+# watershed. This comes directly from rayshader, but basically
+#you are creating a png image (which is itself a kind of raster)
+# and then aligning each colored pixel over your 3d DEM and 
+# then rayshader is doing some rendering to make the overlay
+# look good
+fliplr = function(x) {
+  x=matrix(raster::extract(x,raster::extent(x),buffer=5),
+                     nrow=ncol(x),ncol=nrow(x))
+ x[,ncol(x):1]
+}
+
+
+# Make a color palette
+fac_colors <- colorRampPalette(colors=c('white','lightblue','blue3','purple3'))(20)
+
+# Code to plot the png that will be draped over the data
+tempfilename = tempfile()
+png(tempfilename,width = ncol(fac_drape),height=nrow(fac_drape))
+par(mar = c(0,0,0,0),bg='transparent')
+raster::image(fliplr(fac_drape),
+              axes = FALSE,xlab='',ylab='',
+              col=fac_colors)
+dev.off()
+#Store the temp_file as water_over(lay)
+water_over = png::readPNG(tempfilename)
+
+
+
+
+raymat = ray_shade(fmat,sunangle=30)
+
+#use rayshader commands to generate map
+#rglwidget embeds output in html
+
+fmat %>%
+  sphere_shade(texture='bw') %>%
+  add_overlay(water_over,alphalayer=1) %>%
+  add_shadow(raymat) %>%
+  plot_3d(fmat,zscale=15,fov=0,theta=200,phi=20,zoom=0.6,
+          windowsize=c(1000,1000))
+
+rglwidget()
+```
+
+
+# Abandoned code
+
+
+### check NLCD coverage
+```{r, eval=F}
+library(FedData)
+nlcd = get_nlcd(fraser_dem,'fraser_nlcd',year=2011)
+
+nlcd_fraser <- nlcd %>% 
+  crop(.,shape_sheds %>% st_transform(.,st_crs(nlcd))) %>%
+         mask(.,shape_sheds %>% st_transform(.,st_crs(nlcd)))
+
+nlcd_key <- tibble(value=c(11,12,21,22,23,24,31,41,42,43,51,52,71,72,73,74,81,82,90,95),
+                   label=c('Open Water','Ice/Snow','Dev','Dev','Dev3','Dev4',
+                           'Barren','Dec.Forest','Evergreen.Forest','Mixed.Forest',
+                           'DwarfScrub','Shrub/Scrub','Grassland','Sedge','Lichens',
+                           'Moss','Pasture','Crops','WoodyWetlands','Wetlands'),
+                   colors=c('lightblue','White','red','red','red2','red3','brown4',
+                            'green4','green4','green4','brown','tan','green2',
+                            'darkolivegreen','green','blue','yellow3','orange3',
+                            'blue','blue'))
+
+
+
+fraser_df <- as.data.frame(nlcd_fraser,xy=T) %>%
+  rename(cover=3) %>%
+  filter(!is.na(cover)) %>%
+  mutate(cover=as.character(cover)) 
+
+order <- getValues(nlcd_fraser) %>% unique()
+
+fraser_key <- nlcd_key %>%
+  filter(value %in% getValues(nlcd_fraser)) %>%
+  arrange(value)
+
+
+mapview(nlcd_fraser)
+
+raster::image(nlcd_fraser,col=fraser_key$colors,axes = FALSE,xlab='',ylab='')
+
+ggplot() + 
+  geom_raster(data=fraser_df,
+              aes(x=x,y=y,fill=cover)) +
+  coord_quickmap() + 
+  scale_fill_manual(labels=fraser_key$label,
+                    values=fraser_key$colors)
+
+```
+
+
+
+## Imagery attempt
+
+```{r,eval=F}
+
+library(geoviz)
+
+
+overlay <- slippy_overlay(fraser_full,image_source='mapbox',
+                          image_type='satellite',api_key = mapbox_key,
+                          png_opacity = 0.9)
+
+
+beetles <- raster('data/vorster/Vorster_et_al_2017_FraserBeetleMortality.tif') %>%
+  projectRaster(.,fraser_full)
+forest_mask <- st_read('data/vorster/LSForestMaks_NonForest2_11_16/LSForestMaks_NonForest2_11_16.shp') %>% st_transform(.,crs=projection(fraser_full))
+
+cuts <- st_read('data/vorster/Treatments/All_Treatments_with_Attributes_1_31.shp')
+
+cuts_raster <- fraser_full %>%
+  crop(.,shape_sheds) %>%
+  mask(.,cuts %>% st_transform(.,crs=projection(fraser_full)))
+
+beetles_forest <- crop(beetles,shape_sheds) %>%
+  mask(.,as(forest_mask,'Spatial'),inverse=T)
+
+
+sub_sheds_all <- shape_sheds %>%
+  filter(id != 3) 
+
+
+sheds_lines_all <- st_cast(sub_sheds_all %>%
+                         st_simplify(.,dTolerance=30) %>%
+                         st_buffer(5),'LINESTRING') %>%
+  st_buffer(45)
+
+big_sheds <-  raster('data/basins/fraser_sheds_1.tif') %>%
+  crop(.,shape_sheds) %>%
+  mask(.,sheds_lines_all)
+
+
+
+tempfilename = tempfile()
+png(tempfilename,width = nrow(fmat),height=ncol(fmat))
+par(mar = c(0,0,0,0),bg='transparent')
+
+raster::image(fliplr(beetles_forest),
+               axes = FALSE,xlab='',ylab='',
+              col=rev(c('#40004b','#762a83','#9970ab','#c2a5cf','#e7d4e8','#d9f0d3','#a6dba0','#5aae61','#1b7837','#00441b')))
+raster::image(fliplr(cuts_raster),
+               axes = FALSE,xlab='',ylab='',
+              col=c('red'),add=T)
+# raster::image(fliplr(big_sheds),
+#               axes = FALSE,xlab='',ylab='',
+#               col=c('#EB008B','#0085ee','black','#0085ee','#EB008B'),add=T)
+dev.off()
+big_outline = png::readPNG(tempfilename)
+
+big.vector <- getValues(beetles_forest)
+pretty_impacted <- big.vector[big.vector > .3]
+
+
+angle=180
+shadows <- ray_shade(fmat, sunangle=angle)
+fmat %>%
+  sphere_shade(texture='bw',sunangle=angle) %>%
+  add_shadow(shadows) %>%
+  add_overlay(overlay,alphalayer=1) %>%
+  add_overlay(big_outline) %>%
+  plot_3d(fmat,zscale=15,fov=0,theta=135,zoom=0.45,phi=45,
+          windowsize=c(1500,1500),background='transparent')
+render_snapshot('full_shed_beetles3.png')
+```
+
