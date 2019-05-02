@@ -58,90 +58,60 @@ sites$VPU = unlist(mapply(vpu_from_point, sites$latitude,
     sites$longitude, WSG84))
 sites$VPU[is.na(sites$COMID)] = NA
 
-# nhd_plus_info(vpu = 4, component = "NHDSnapshot", dsn = "NHDWaterbody")
-# nhd_plus_info(vpu = 1, component = "NHDPlusAttributes", dsn = "PlusFlow")
-# nhd_plus_get(vpu = 1, component = "NHDPlusAttributes")
-# nhd_plus_list(vpu = 1, component = "NHDSnapshot")
-# nhd_plus_list(vpu = 1)
+calc_reach_props = function(df) {
 
-# z = nhd_plus_load(vpu=1, component='NHDPlusAttributes', dsn='PlusFlow',
-function(df) {
+    message(paste0('The nhdR package downloads NHDPlusV2 components to ',
+        nhdR:::nhd_path(), '. Unfortunately this cannot be changed.',
+        ' Fortunately, each component need only be downloaded once.'))
 
     out = c()
-    for(i in nrow(df)) {
+    for(i in 1:nrow(df)) {
 
+        print(i)
         vpu = df$VPU[i]
-        lat = df$latitude[i]
-        long = df$longitude[i]
-        comid = df$COMID[i]
 
-        if(is.na(VPU)) {
+        if(is.na(vpu)) {
             out = append(out, 'NA')
             message(paste0('Skipping row ', i, '. Not associated with NHD.'))
             next
         }
 
-        message(paste0('Downloading NHDPlusV2 flowline components for VPU "',
-            vpu, '". This only needs to happen once.'))
         fl = nhd_plus_load(vpu=vpu, component='NHDSnapshot',
             dsn='NHDFlowline', approve_all_dl=TRUE)
         fl_etc = nhd_plus_load(vpu=vpu, component='NHDPlusAttributes',
             dsn='PlusFlowlineVAA', approve_all_dl=TRUE)
-        fl_etc = tryCatch(nhd_plus_load(vpu=vpu, component='NHDPlusAttributes',
-            dsn='PlusFlowlineVAA', approve_all_dl=TRUE),
-            error=function(e) {
-                if(grepl('not found', e)) {
-                    return('bug?')
-                } else {
-                    return(e)
-                }
-            })
-        if('character' %in% class(fl_etc) && fl_etc == 'bug?') {
-            nhdR_dir = paste0(Sys.getenv("XDG_DATA_HOME",  "~/.local/share"),
-                '/nhdR/NHDPlus')
-            nhdR_files = list.files(nhdR_dir, pattern='7z')
-            # nhdR_dirs = list.dirs(nhdR_dir, full.names=FALSE, recursive=FALSE)
-            bug = ! any(grepl(paste0(vpu, '_NHDPlusAttributes'), nhdR_files))
-            if(bug) {
-                message(paste('\nDisregard previous message.',
-                    'Caught bug in nhdR package.'))
-                vpu_num = str_match(vpu, '[0-9]+')[,1]
-                to_mv = grepl(paste0(vpu_num, '[A-Z]?_NHDPlusAttributes'),
-                    nhdR_files)
-                file.remove(paste0(nhdR_dir, '/', nhdR_files[to_mv]))
-                # file.rename(paste0(nhdR_dir, '/', nhdR_files[to_mv]),
-                #     paste0(nhdR_dir, '/..'))
-            }
 
-        }
-        # warning=function(w){print('aaa');print(w)})
+        colnames(fl)[colnames(fl) == 'ComID'] = 'COMID'
+        colnames(fl)[colnames(fl) == 'ReachCode'] = 'REACHCODE'
+        # fl = rename_if(fl, 'COMID'='ComID', 'REACHCODE'='ReachCode')
+        fl = fl[fl$COMID %in% df$COMID[i],]
+        fl = left_join(fl, fl_etc[, c('ComID', 'ToMeas', 'FromMeas')],
+            by=c('COMID'='ComID'))
 
-        fl = fl[fl$ComID %in% comid,]
-        fl = left_join(fl, fl_etc[, c('ComID', 'ToMeas', 'FromMeas')], by='ComID') %>%
-            rename(COMID=ComID, REACHCODE=ReachCode)
-
-        pt = st_point(c(-111.6690, 33.57110))
-        pt = st_point(c(sites$longitude, sites$latitude))
+        pt = st_point(c(df$longitude[i], df$latitude[i]))
         ptc = st_sfc(pt, crs=WSG84)
         ptct = st_transform(ptc, crs=NAD83)
-        ptct = sf_project(ptc, crs=NAD83)
-        q = get_flowline_index(z3, points=ptct) #REACH_meas: 100=upstream end; 0=down
+        x = suppressWarnings(get_flowline_index(fl, points=ptc))
+        out = append(out, x$REACH_meas) #100=upstream end; 0=downstream end
     }
 
-    mapview(z3) + mapview(ptct)
+    return(out)
+}
 
-    subset = subset %>%
-        st_as_sf(coords=c('longitude','latitude'), crs=4326) %>%
-        st_transform(PROJ4)
+sites$reach_proportion = calc_reach_props(sites)
 
-    #get DEM, 14 is highest res, broadest area; 1 is converse
-    dem = get_elev_raster(subset, z=8)
-    mapview(dem) + mapview(subset)
+subset = subset %>%
+    st_as_sf(coords=c('longitude','latitude'), crs=4326) %>%
+    st_transform(PROJ4)
 
-    devtools::install_github("jsta/nhdR")
+#get DEM, 14 is highest res, broadest area; 1 is converse
+dem = get_elev_raster(subset, z=8)
+mapview(dem) + mapview(subset)
 
-    #convert to spatial object and project from WGS 84
-    # subset = subset %>%
-    #     st_as_sf(coords=c('longitude','latitude'), crs=4326) %>%
-    #     st_transform(PROJ4)
+devtools::install_github("jsta/nhdR")
+
+#convert to spatial object and project from WGS 84
+# subset = subset %>%
+#     st_as_sf(coords=c('longitude','latitude'), crs=4326) %>%
+#     st_transform(PROJ4)
 
