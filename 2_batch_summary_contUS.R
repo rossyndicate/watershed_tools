@@ -13,20 +13,22 @@ library(nhdplusTools)
 library(nhdR)
 # knitr::knit_hooks$set(webgl = hook_webgl)
 
-# setwd('~/git/streampulse/other_projects/watershed_data/')
-setwd('~/Desktop/untracked/sp_watershed_delin')
+setwd('~/Desktop/untracked/sp_watershed_delin') #this can be any empty directory
 
-#read in mysql pw
-conf = readLines('/home/mike/git/streampulse/server_copy/sp/config.py')
-# conf = readLines('/home/aaron/sp/config.py')
-ind = which(lapply(conf, function(x) grepl('MYSQL_PW', x)) == TRUE)
-pw = str_match(conf[ind], '.*\\"(.*)\\"')[2]
+# #read in mysql pw
+# conf = readLines('/home/mike/git/streampulse/server_copy/sp/config.py')
+# # conf = readLines('/home/aaron/sp/config.py')
+# ind = which(lapply(conf, function(x) grepl('MYSQL_PW', x)) == TRUE)
+# pw = str_match(conf[ind], '.*\\"(.*)\\"')[2]
+#
+# #read in site table from mysql
+# con = dbConnect(RMariaDB::MariaDB(), dbname='sp', username='root', password=pw)
+# sites = as_tibble(dbReadTable(con, "site")) %>%
+#     arrange(latitude, longitude) %>%
+#     mutate(regionsite=paste(region, site, sep='_'))
 
-#read in site and results tables from mysql
-con = dbConnect(RMariaDB::MariaDB(), dbname='sp', username='root', password=pw)
-sites = as_tibble(dbReadTable(con, "site")) %>%
-    arrange(latitude, longitude) %>%
-    mutate(regionsite=paste(region, site, sep='_'))
+# saveRDS(sites, '~/Desktop/site_data.rds')
+sites = readRDS('site_data.rds')
 
 #append projection string to sites df
 sites$PROJ4 = paste0('+proj=laea +lat_0=', sites$latitude,
@@ -38,6 +40,7 @@ sites$PROJ4[equatorial_sites] =
 WSG84 = 4326
 NAD83 = 4269
 
+#COMID is the NHDPlus identifier for any reach. This gets it from lat/long
 comid_from_point = function(lat, long, crs) {
     pt = st_point(c(long, lat))
     ptc = st_sfc(pt, crs=crs)
@@ -48,6 +51,7 @@ comid_from_point = function(lat, long, crs) {
 sites$COMID = unlist(mapply(comid_from_point, sites$latitude,
     sites$longitude, WSG84))
 
+#VPU is an NHDPlus processing unit. needed for the next function to work
 vpu_from_point = function(lat, long, crs) {
     pt = st_point(c(long, lat))
     ptc = st_sfc(pt, crs=crs)
@@ -58,6 +62,9 @@ sites$VPU = unlist(mapply(vpu_from_point, sites$latitude,
     sites$longitude, WSG84))
 sites$VPU[is.na(sites$COMID)] = NA
 
+#this calculates how far along a reach any given point falls. That way when we pull in
+#watershed summary data for a reach, we can adjust it according to how much
+#of the total upstream area actually contributes to the point in question.
 calc_reach_props = function(df) {
 
     message(paste0('The nhdR package downloads NHDPlusV2 components to ',
@@ -104,7 +111,7 @@ subset = subset %>%
     st_as_sf(coords=c('longitude','latitude'), crs=4326) %>%
     st_transform(PROJ4)
 
-#get DEM, 14 is highest res, broadest area; 1 is converse
+#get DEM, 14 is highest res, smallest area; 1 is lowest res, broadest area
 dem = get_elev_raster(subset, z=8)
 mapview(dem) + mapview(subset)
 
