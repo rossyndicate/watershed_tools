@@ -1,5 +1,5 @@
 library(sf)#
-library(mapview)###
+library(mapview)#
 # library(elevatr)#
 library(raster)#
 # devtools::install_github("giswqs/whiteboxR")
@@ -7,26 +7,28 @@ library(raster)#
 library(RMariaDB) #
 library(stringr) #
 library(dplyr) #
+library(plyr) #
 # devtools::install_github("USGS-R/nhdplusTools")
 library(nhdplusTools)
 # devtools::install_github("jsta/nhdR")
 library(nhdR)
 # knitr::knit_hooks$set(webgl = hook_webgl)
 library(RCurl)
+library(MODISTools)
 
 setwd('~/Desktop/untracked/sp_watershed_delin') #this can be any empty directory
 
-#read in mysql pw
-conf = readLines('/home/mike/git/streampulse/server_copy/sp/config.py')
-# conf = readLines('/home/aaron/sp/config.py')
-ind = which(lapply(conf, function(x) grepl('MYSQL_PW', x)) == TRUE)
-pw = str_match(conf[ind], '.*\\"(.*)\\"')[2]
-
-#read in site table from mysql
-con = dbConnect(RMariaDB::MariaDB(), dbname='sp', username='root', password=pw)
-sites = as_tibble(dbReadTable(con, "site")) %>%
-    arrange(latitude, longitude) %>%
-    mutate(regionsite=paste(region, site, sep='_'))
+# #read in mysql pw
+# conf = readLines('/home/mike/git/streampulse/server_copy/sp/config.py')
+# # conf = readLines('/home/aaron/sp/config.py')
+# ind = which(lapply(conf, function(x) grepl('MYSQL_PW', x)) == TRUE)
+# pw = str_match(conf[ind], '.*\\"(.*)\\"')[2]
+#
+# #read in site table from mysql
+# con = dbConnect(RMariaDB::MariaDB(), dbname='sp', username='root', password=pw)
+# sites = as_tibble(dbReadTable(con, "site")) %>%
+#     arrange(latitude, longitude) %>%
+#     mutate(regionsite=paste(region, site, sep='_'))
 
 # saveRDS(sites, '~/Desktop/site_data.rds')
 # sites = readRDS('site_data.rds')
@@ -108,7 +110,164 @@ calc_reach_props = function(df) {
 }
 sites$reach_proportion = calc_reach_props(sites)
 
+####NOTE: calc_reach_props fills up system memory, so use the following code to
+####save sites dataframe, then close R, reopen it, and start from here.
+# write.csv(sites, row.names=FALSE,
+#     '/home/mike/Dropbox/streampulse/data/watershed_data/with_reachprop.csv')
+# sites = read.csv('/home/mike/Dropbox/streampulse/data/watershed_data/with_reachprop.csv',
+#     stringsAsFactors=FALSE)
+
 #acquire basic watershed and catchment characteristics from the nhdplusv2
+nhdplusv2_from_comid = function(VPU, COMID, component, DSN, silent=FALSE) {
+
+    if(! silent){
+        message(paste0('The nhdR package downloads NHDPlusV2 components to ',
+            nhdR:::nhd_path(), '. Unfortunately this cannot be changed.',
+            ' Fortunately, each component need only be downloaded once.'))
+    }
+
+    data = nhd_plus_load(vpu=VPU, component=component,
+        dsn=DSN, approve_all_dl=TRUE)
+
+    colnames(data)[colnames(data) == 'ComID'] = 'COMID'
+    colnames(data)[colnames(data) == 'ReachCode'] = 'REACHCODE'
+    data = data[data$COMID == COMID,]
+
+    return(data)
+}
+
+nhdplus_sets = list(#'NHDSnapshot'='NHDFlowline',
+    'NHDPlusAttributes'='PlusFlowlineVAA', #'NHDPlusAttributes'='PlusFlowAR',
+    'NHDPlusAttributes'='ElevSlope')
+nhdplus_data = data.frame()
+
+for(j in 1:nrow(sites)){
+    if(is.na(sites$COMID[j])) next
+
+    for(i in 1:length(nhdplus_sets)){
+        print(paste(j, nhdplus_sets[[i]]))
+
+        if(i == 1){
+            row_base = nhdplusv2_from_comid(sites$VPU[j], sites$COMID[j],
+                names(nhdplus_sets[i]), nhdplus_sets[[i]], silent=TRUE)
+        } else {
+            row_ext = nhdplusv2_from_comid(sites$VPU[j], sites$COMID[j],
+                names(nhdplus_sets[i]), nhdplus_sets[[i]], silent=TRUE)
+            row_base = left_join(row_base, row_ext)
+        }
+
+    }
+
+    nhdplus_data = rbind.fill(nhdplus_data, row_base)
+}
+
+####TO-DO: figure out why PlusFlowAR contains no data
+####filter nhdplus_data so that it only contains variables we're interested in
+####merge nhdplus data with sites dataframe
+
+#find out which streamcat datasets are available
+query_streamcat_datasets = function(keyword=NULL){
+
+    ftpdir = paste0('ftp://newftp.epa.gov/EPADataCommons/ORD/',
+        'NHDPlusLandscapeAttributes/StreamCat/States/')
+
+    url_list = getURL(ftpdir, dirlistonly=TRUE)
+    url_list = strsplit(url_list, split='\n')[[1]]
+
+    if(! is.null(keyword)){
+        url_list = url_list[grep(keyword, url_list, ignore.case=TRUE)]
+    }
+
+    return(url_list)
+}
+query_streamcat_datasets('ripbuf')
+
+#acquire lots of diverse data from streamcat
+streamcat_from_comid = function(USstate, COMID, dataset){
+
+    ftpdir = paste0('ftp://newftp.epa.gov/EPADataCommons/ORD/',
+        'NHDPlusLandscapeAttributes/StreamCat/States/')
+    zip_name = paste0(dataset, '_', USstate, '.zip')
+
+    csv_name = gsub('.zip', '.csv', zip_name)
+    temp = tempfile()
+    download.file(paste0(ftpdir, zip_name), temp)
+    data = read.csv(unz(temp, csv_name), stringsAsFactors=FALSE)
+    data = data[data$COMID == COMID,]
+
+    return(data)
+}
+
+streamcat_sets = c('Elevation', 'PRISM_1981_2010', 'NLCD2011', 'Runoff',
+    'STATSGO_Set2', 'NADP', 'GeoChemPhys1', 'GeoChemPhys2', 'BFI')
+streamcat_data = data.frame()
+
+for(j in 1:nrow(sites)){
+    if(is.na(sites$COMID[j])) next
+
+    for(i in 1:length(streamcat_sets)){
+        print(paste(j, streamcat_sets[i]))
+
+        if(i == 1){
+            # row_base = tryCatch(
+            row_base = streamcat_from_comid(sites$region[j], sites$COMID[j],
+                streamcat_sets[i])
+            #     error=function(e){print('fail')},
+            #     warning=function(w){NULL},
+            # )
+        } else {
+            row_ext = streamcat_from_comid(sites$region[j], sites$COMID[j],
+                streamcat_sets[i])
+            row_base = left_join(row_base, row_ext)
+        }
+
+    }
+
+    streamcat_data = rbind.fill(streamcat_data, row_base)
+}
+
+####TO-DO: filter streamcat_data so that it only contains variables we're interested in
+####merge nhdplus data with sites dataframe
+
+#acquire MODIS data (this section not yet begun)
+# VNP13A1
+mt_bands("MOD13Q1")
+subset1 <- mt_subset(product = "MOD13Q1",
+    lat = 40,
+    lon = -110,
+    band = "250m_16_days_NDVI",
+    start = "2004-01-01",
+    end = "2004-02-01",
+    km_lr = 10,
+    km_ab = 10,
+    site_name = "testsite",
+    internal = TRUE,
+    progress = FALSE)
+
+dfx <- data.frame("site_name" = paste("test",1:2))
+dfx$lat <- 40
+dfx$lon <- -110
+
+# test batch download
+subsets <- mt_batch_subset(dfx = dfx,
+    product = "MOD11A2",
+    band = "LST_Day_1km",
+    internal = TRUE,
+    start = "2004-01-01",
+    end = "2004-02-01")
+
+
+#adjust catchment and watershed area for reach proportion
+sites$AreaSqKM = sites$AreaSqKM * sites$reach_proportion
+    #make a function to do this generically?
+
+
+
+
+#### SCRAPS ####
+
+#this works, but i replaced it with a more rudimentary function that
+#just acquires data and leaves postprocessing to the user
 merge_nhdplus_attr = function(df) {
 
     message(paste0('The nhdR package downloads NHDPlusV2 components to ',
@@ -162,7 +321,7 @@ merge_nhdplus_attr = function(df) {
 }
 sites = merge_nhdplus_attr(sites)
 
-#acquire streamcat catchment watershed characteristics
+#acquire streamcat catchment watershed characteristics (batch; incomplete)
 merge_streamcat_attr = function(df, storage_path){
 
     out = data.frame()
@@ -247,14 +406,8 @@ merge_streamcat_attr = function(df, storage_path){
 
     return(out)
 }
+
 # storage_path='/home/mike/.local/share/StreamCat'
-
-#adjust catchment and watershed area for reach proportion
-sites$AreaSqKM = sites$AreaSqKM * sites$reach_proportion
-    #make a function to do this generically?
-
-
-
 
 # subset = subset %>%
 #     st_as_sf(coords=c('longitude', 'latitude'), crs=4326) %>%
