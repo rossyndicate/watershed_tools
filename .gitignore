@@ -3,4 +3,7 @@
 .RData
 .Ruserdata
 data/
-.html
+*.html
+*.rds
+*.csv
+2_batch_summary.R
