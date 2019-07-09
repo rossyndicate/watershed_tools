@@ -1,142 +1,108 @@
-library(sf)#
-library(mapview)#
-# library(elevatr)#
-library(raster)#
-# devtools::install_github("giswqs/whiteboxR")
-# library(stars) #
-library(RMariaDB) #
-library(stringr) #
-library(dplyr) #
-library(plyr) #
+#use these tools to:
+    #1. acquire NHDPlusV2 COMIDs based on lat/long
+    #2. acquire NHDPlusV2 VPU IDs based on lat/long
+    #3. use COMID and VPU to acquire NHDPlusV2 data for your sites
+    #4. use COMID to acquire StreamCat data for your sites
+    #5. determine the position of a site along its NHD reach and calculate reach
+    #   proportion, then adjust linear and areal summary data accordingly
+
+#see NHDPlusV2 docs (1) and StreamCat variable list (2) for help.
+#1. ftp://ftp.horizon-systems.com/NHDplus/NHDPlusV21/Documentation/NHDPlusV2_User_Guide.pdf
+#2. ftp://newftp.epa.gov/EPADataCommons/ORD/NHDPlusLandscapeAttributes/StreamCat/Documentation/VariableList-QuickReference.html
+
+#NOTE: these tools necessarily download a lot of large datasets and store them
+#in memory. keep an eye on your usage.
+
+library(stringr)
+library(dplyr)
+library(plyr)
 # devtools::install_github("USGS-R/nhdplusTools")
 library(nhdplusTools)
 # devtools::install_github("jsta/nhdR")
 library(nhdR)
-# knitr::knit_hooks$set(webgl = hook_webgl)
 library(RCurl)
-library(MODISTools)
+library(sf)
+# library(MODISTools)
 
-setwd('~/git/watershed_tools/') #this can be any empty directory
+setwd('~/git/watershed_tools/')
 
-# #read in mysql pw
-# conf = readLines('/home/mike/git/streampulse/server_copy/sp/config.py')
-# # conf = readLines('/home/aaron/sp/config.py')
-# ind = which(lapply(conf, function(x) grepl('MYSQL_PW', x)) == TRUE)
-# pw = str_match(conf[ind], '.*\\"(.*)\\"')[2]
-#
-# #read in site table from mysql
-# con = dbConnect(RMariaDB::MariaDB(), dbname='sp', username='root', password=pw)
-# sites = as_tibble(dbReadTable(con, "site")) %>%
-#     arrange(latitude, longitude) %>%
-#     mutate(regionsite=paste(region, site, sep='_'))
+sites = read.csv('site_data.csv', stringsAsFactors=FALSE)
+# sites = readRDS('site_table_for_ws.rds')
 
-# saveRDS(sites, '~/Desktop/site_data.rds')
-# sites = readRDS('site_data.rds')
-sites = readRDS('site_table_for_ws.rds')
-sites = sites[sites$by > 0,]
-sites = sites[sites$site != 'PILG1',]
+WSG84 = 4326 #EPSG code for coordinate reference system
 
-#append projection string to sites df
-sites$PROJ4 = paste0('+proj=laea +lat_0=', sites$latitude,
-    ' +lon_0=', sites$latitude)
-equatorial_sites = sites$latitude <= 15 & sites$latitude >= -15
-sites$PROJ4[equatorial_sites] =
-    paste0('+proj=laea +lon_0=', sites$latitude)[equatorial_sites]
-
-WSG84 = 4326
-NAD83 = 4269
-
-#COMID is the NHDPlus identifier for any reach. This gets it from lat/long
-comid_from_point = function(lat, long, crs) {
-    pt = st_point(c(long, lat))
-    ptc = st_sfc(pt, crs=crs)
-    COMID = discover_nhdplus_id(ptc)
+#COMID is the NHD identifier for any reach in the continental U.S.
+#add COMIDs to your site table.
+comid_from_point = function(lat, long, CRS) {
+    pt = sf::st_point(c(long, lat))
+    ptc = sf::st_sfc(pt, crs=CRS)
+    COMID = nhdplusTools::discover_nhdplus_id(ptc)
     if(! length(COMID)) COMID = NA
     return(COMID)
 }
+
 sites$COMID = unlist(mapply(comid_from_point, sites$latitude,
     sites$longitude, WSG84))
-
 sites = sites[! is.na(sites$COMID),]
-# write.csv(sites, '~/git/watershed_tools/sites_with_comid.csv', row.names=FALSE)
 
-#VPU is an NHDPlus processing unit. needed for the next function to work
-vpu_from_point = function(lat, long, crs) {
-    pt = st_point(c(long, lat))
-    ptc = st_sfc(pt, crs=crs)
-    VPU = find_vpu(ptc)
+#VPU == NHD vector processing unit. NHDPlusV2 data are downloaded per VPU.
+#add VPUs to your site table.
+vpu_from_point = function(lat, long, CRS) {
+    pt = sf::st_point(c(long, lat))
+    ptc = sf::st_sfc(pt, crs=CRS)
+    VPU = nhdR::find_vpu(ptc)
     return(VPU)
 }
+
 sites$VPU = unlist(mapply(vpu_from_point, sites$latitude,
     sites$longitude, WSG84))
-sites$VPU[is.na(sites$COMID)] = NA
 
 #this calculates how far along a reach any given point falls. That way when we pull in
 #watershed summary data for a reach, we can adjust it according to how much
 #of the total upstream area actually contributes to the point in question.
 # A value of 0 means upstream end; 1 means downstream end.
+calc_reach_prop = function(VPU, COMID, lat, long, CRS, quiet=FALSE){
 
-#does not need to be a separate function. just use nhdplusv2_from_comid
-#and calculate reach proportion from the output
-calc_reach_props = function(df) {
-
-    message(paste0('The nhdR package downloads NHDPlusV2 components to ',
-        nhdR:::nhd_path(), '. Unfortunately this cannot be changed.',
-        ' Fortunately, each component need only be downloaded once.'))
-
-    out = c()
-    for(i in 1:nrow(df)) {
-
-        print(i)
-        vpu = df$VPU[i]
-
-        if(is.na(vpu)) {
-            out = append(out, NA)
-            message(paste0('Skipping row ', i, '. Not associated with NHD.'))
-            next
-        }
-
-        fl = nhd_plus_load(vpu=vpu, component='NHDSnapshot',
-            dsn='NHDFlowline', approve_all_dl=TRUE)
-        fl_etc = nhd_plus_load(vpu=vpu, component='NHDPlusAttributes',
-            dsn='PlusFlowlineVAA', approve_all_dl=TRUE)
-
-        colnames(fl)[colnames(fl) == 'ComID'] = 'COMID'
-        colnames(fl)[colnames(fl) == 'ReachCode'] = 'REACHCODE'
-        # fl = rename_if(fl, 'COMID'='ComID', 'REACHCODE'='ReachCode')
-        fl = fl[fl$COMID %in% df$COMID[i],]
-        fl = left_join(fl, fl_etc[, c('ComID', 'ToMeas', 'FromMeas')],
-            by=c('COMID'='ComID'))
-
-        pt = st_point(c(df$longitude[i], df$latitude[i]))
-        ptc = st_sfc(pt, crs=WSG84)
-        ptct = st_transform(ptc, crs=NAD83)
-        x = suppressWarnings(get_flowline_index(fl, points=ptc))
-        out = append(out, 1 - x$REACH_meas / 100) #0=upstream end; 1=downstream end
-    }
-
-    return(out)
-}
-sites$reach_proportion = calc_reach_props(sites)
-
-####NOTE: calc_reach_props fills up system memory, so use the following code to
-####save sites dataframe, then close R, reopen it, and start from here.
-# write.csv(sites, row.names=FALSE,
-#     '/home/mike/Dropbox/streampulse/data/watershed_data/sites_with_reachprop.csv')
-# sites = read.csv('/home/mike/Dropbox/streampulse/data/watershed_data/sites_with_reachprop.csv',
-#     stringsAsFactors=FALSE)
-
-#acquire basic watershed and catchment characteristics from the nhdplusv2
-####TO-DO: figure out why PlusFlowAR contains no data
-nhdplusv2_from_comid = function(VPU, COMID, component, DSN, silent=FALSE) {
-
-    if(! silent){
+    if(! quiet){
         message(paste0('The nhdR package downloads NHDPlusV2 components to ',
             nhdR:::nhd_path(), '. Unfortunately this cannot be changed.',
             ' Fortunately, each component need only be downloaded once.'))
     }
 
-    data = nhd_plus_load(vpu=VPU, component=component,
+    fl = nhdR::nhd_plus_load(vpu=VPU, component='NHDSnapshot',
+        dsn='NHDFlowline', approve_all_dl=TRUE)
+    fl_etc = nhdR::nhd_plus_load(vpu=VPU, component='NHDPlusAttributes',
+        dsn='PlusFlowlineVAA', approve_all_dl=TRUE)
+
+    colnames(fl)[colnames(fl) == 'ComID'] = 'COMID'
+    colnames(fl)[colnames(fl) == 'ReachCode'] = 'REACHCODE'
+    fl = fl[fl$COMID == COMID,]
+    fl = left_join(fl, fl_etc[, c('ComID', 'ToMeas', 'FromMeas')],
+        by=c('COMID'='ComID'))
+
+    pt = sf::st_point(c(long, lat))
+    ptc = sf::st_sfc(pt, crs=CRS)
+    ptct = sf::st_transform(ptc, crs=4269) #CRS for NAD 83
+    x = suppressWarnings(nhdplusTools::get_flowline_index(fl, points=ptct))
+    out = 1 - x$REACH_meas / 100 #0=upstream end; 1=downstream end
+
+    return(out)
+}
+
+sites$reach_proportion = unlist(mapply(calc_reach_prop, sites$VPU, sites$COMID,
+    sites$latitude, sites$longitude, WSG84, quiet=TRUE))
+
+#this function acquires nhdplusv2 data for a single site by COMID.
+#it's just a thin wrapper around nhdR::nhd_plus_load
+nhdplusv2_from_comid = function(VPU, COMID, component, DSN, quiet=FALSE) {
+
+    if(! quiet){
+        message(paste0('The nhdR package downloads NHDPlusV2 components to ',
+            nhdR:::nhd_path(), '. Unfortunately this cannot be changed.',
+            ' Fortunately, each component need only be downloaded once.'))
+    }
+
+    data = nhdR::nhd_plus_load(vpu=VPU, component=component,
         dsn=DSN, approve_all_dl=TRUE)
 
     colnames(data)[colnames(data) == 'ComID'] = 'COMID'
@@ -146,59 +112,73 @@ nhdplusv2_from_comid = function(VPU, COMID, component, DSN, silent=FALSE) {
     return(data)
 }
 
-nhdplus_sets = list(#'NHDSnapshot'='NHDFlowline',
-    'NHDPlusAttributes'='PlusFlowlineVAA', #'NHDPlusAttributes'='PlusFlowAR',
+#construct list of DSN=component pairs to acquire. see docs for more.
+setlist = list('NHDPlusAttributes'='PlusFlowlineVAA',
     'NHDPlusAttributes'='ElevSlope')
-nhdplus_data = data.frame()
+    #'NHDSnapshot'='NHDFlowline', 'NHDPlusAttributes'='PlusFlowAR'
 
-for(j in 1:nrow(sites)){
-    if(is.na(sites$COMID[j])) next
+#this calls nhdplusv2_from_comid repeatedly to get data for all your sites.
+#the dataframe must include COMID and VPU columns
+nhdplusv2_bulk = function(site_df, nhdplusv2_sets, quiet=FALSE){
 
-    for(i in 1:length(nhdplus_sets)){
-        print(paste(j, nhdplus_sets[[i]]))
+    nhdplus_data = data.frame()
 
-        if(i == 1 || initerr){
-            row_base = try(nhdplusv2_from_comid(sites$VPU[j], sites$COMID[j],
-                names(nhdplus_sets[i]), nhdplus_sets[[i]], silent=TRUE))
-            if(class(row_base)[1] == 'try-error'){
-                initerr = TRUE
-                print('init error')
+    for(j in 1:nrow(site_df)){
+        if(is.na(site_df$COMID[j])) next
+
+        for(i in 1:length(setlist)){
+            print(paste(j, nhdplusv2_sets[[i]]))
+
+            if(i == 1 || initerr){
+                row_base = try(nhdplusv2_from_comid(site_df$VPU[j],
+                    site_df$COMID[j], names(setlist[i]), setlist[[i]],
+                    quiet=quiet))
+                if(class(row_base)[1] == 'try-error'){
+                    initerr = TRUE
+                    print('init error')
+                } else {
+                    initerr = FALSE
+                }
             } else {
-                initerr = FALSE
+                row_ext = try(nhdplusv2_from_comid(site_df$VPU[j],
+                    site_df$COMID[j], names(setlist[i]), setlist[[i]],
+                    quiet=quiet))
+                if(class(row_ext)[1] == 'try-error'){
+                    print('error')
+                    next
+                }
+                row_base = left_join(row_base, row_ext)
             }
-        } else {
-            row_ext = try(nhdplusv2_from_comid(sites$VPU[j], sites$COMID[j],
-                names(nhdplus_sets[i]), nhdplus_sets[[i]], silent=TRUE))
-            if(class(row_ext)[1] == 'try-error'){
-                print('error')
-                next
-            }
-            row_base = left_join(row_base, row_ext)
+
         }
 
+        nhdplus_data = rbind.fill(nhdplus_data, row_base)
     }
 
-    nhdplus_data = rbind.fill(nhdplus_data, row_base)
+    return(nhdplus_data)
 }
 
-colnames(nhdplus_data) = toupper(colnames(nhdplus_data))
-# lengthkm_dupe = which(colnames(nhdplus_data) == 'LENGTHKM')
-# nhdplus_data = nhdplus_data[,-lengthkm_dupe[1]]
-nhdplus_data = nhdplus_data[, ! duplicated(colnames(nhdplus_data))]
-nhdplus_data = select(nhdplus_data, COMID, STREAMORDE, FROMMEAS, TOMEAS, SLOPE,
+nhdplusv2_data = nhdplusv2_bulk(sites, setlist, quiet=TRUE)
+
+#nhd variable names do not have consistent naming conventions. sometimes they're
+#all caps; other times camel case. here's a crude way to deal with that.
+colnames(nhdplusv2_data) = toupper(colnames(nhdplusv2_data))
+nhdplusv2_data = nhdplusv2_data[, ! duplicated(colnames(nhdplusv2_data))]
+
+#pick out the variables you want, then join them to your site data
+nhdplusv2_data = select(nhdplusv2_data, COMID, STREAMORDE, FROMMEAS, TOMEAS, SLOPE,
     REACHCODE, AREASQKM, TOTDASQKM, MAXELEVSMO, MINELEVSMO)
-sites = left_join(sites, nhdplus_data, by='COMID')
+sites = left_join(sites, nhdplusv2_data, by='COMID')
 sites = sites[! duplicated(sites$site),]
+
+#correct catchment area (AREASQKM) based on where each site falls within its reach.
+#use this to correct watershed area (TOTDASQKM) and to determine an areal
+#correction factor that can be multiplied with any areal summary data.
 sites$AREASQKM_corr = round(sites$AREASQKM * sites$reach_proportion, 5)
 sites$TOTDASQKM_corr = sites$TOTDASQKM - (sites$AREASQKM - sites$AREASQKM_corr)
 sites$areal_corr_factor = sites$TOTDASQKM_corr / sites$TOTDASQKM
 
-# write.csv(sites, row.names=FALSE,
-#     '/home/mike/Dropbox/streampulse/data/watershed_data/sites_with_nhd.csv')
-# sites = read.csv('/home/mike/Dropbox/streampulse/data/watershed_data/sites_with_nhd.csv',
-#     stringsAsFactors=FALSE)
-
-#find out which streamcat datasets are available
+#find out which streamcat datasets are available (case insensitive)
 query_streamcat_datasets = function(keyword=NULL){
 
     ftpdir = paste0('ftp://newftp.epa.gov/EPADataCommons/ORD/',
@@ -213,9 +193,10 @@ query_streamcat_datasets = function(keyword=NULL){
 
     return(url_list)
 }
+query_streamcat_datasets()
 query_streamcat_datasets('ripbuf')
 
-#acquire lots of diverse data from streamcat
+#this function acquires streamcat data for a single site by NHDPlusV2 COMID.
 streamcat_from_comid = function(USstate, COMID, dataset){
 
     ftpdir = paste0('ftp://newftp.epa.gov/EPADataCommons/ORD/',
@@ -231,50 +212,52 @@ streamcat_from_comid = function(USstate, COMID, dataset){
     return(data)
 }
 
-streamcat_sets = c('Elevation', 'PRISM_1981_2010', 'NLCD2011', 'Runoff',
+#construct vector of streamcat datasets to acquire
+setlist2 = c('Elevation', 'PRISM_1981_2010', 'NLCD2011', 'Runoff',
     'STATSGO_Set2', 'NADP', 'GeoChemPhys1', 'GeoChemPhys2', 'BFI')
-streamcat_data = data.frame()
 
+#this calls streamcat_from_comid repeatedly to get data for all your sites
+#the dataframe must include COMID and region columns, where "region" refers to
+#each state's 2-letter abbreviation.
+streamcat_bulk = function(site_df, streamcat_sets){
 
-for(j in 1:nrow(sites)){
-    if(is.na(sites$COMID[j])) next
-    initerr = FALSE
+    streamcat_data = data.frame()
 
-    for(i in 1:length(streamcat_sets)){
-        print(paste(j, streamcat_sets[i]))
+    for(j in 1:nrow(site_df)){
+        if(is.na(site_df$COMID[j])) next
+        initerr = FALSE
 
-        if(i == 1 || initerr){
-            # row_base = tryCatch(
-            row_base = try(streamcat_from_comid(sites$region[j], sites$COMID[j],
-                streamcat_sets[i]))
-            if(class(row_base)[1] == 'try-error'){
-                initerr = TRUE
-                print('init error')
+        for(i in 1:length(streamcat_sets)){
+            print(paste(j, streamcat_sets[i]))
+
+            if(i == 1 || initerr){
+                row_base = try(streamcat_from_comid(site_df$region[j],
+                    site_df$COMID[j], streamcat_sets[i]))
+                if(class(row_base)[1] == 'try-error'){
+                    initerr = TRUE
+                    print('init error')
+                } else {
+                    initerr = FALSE
+                }
             } else {
-                initerr = FALSE
+                row_ext = try(streamcat_from_comid(site_df$region[j],
+                    site_df$COMID[j], streamcat_sets[i]))
+                if(class(row_ext)[1] == 'try-error'){
+                    print('error')
+                    next
+                }
+                row_base = left_join(row_base, row_ext)
             }
-            #     error=function(e){print('fail')},
-            #     warning=function(w){NULL},
-            # )
-        } else {
-            row_ext = try(streamcat_from_comid(sites$region[j], sites$COMID[j],
-                streamcat_sets[i]))
-            if(class(row_ext)[1] == 'try-error'){
-                print('error')
-                next
-            }
-            row_base = left_join(row_base, row_ext)
+
         }
 
+        streamcat_data = rbind.fill(streamcat_data, row_base)
     }
 
-    streamcat_data = rbind.fill(streamcat_data, row_base)
+    return(streamcat_data)
 }
 
-write.csv(streamcat_data, row.names=FALSE,
-    '/home/mike/Dropbox/streampulse/data/watershed_data/streamcat.csv')
-# streamcat_data = read.csv('/home/mike/Dropbox/streampulse/data/watershed_data/streamcat.csv',
-#     stringsAsFactors=FALSE)
+#pick out the variables you want, then join them to your site data
 streamcat_data = select(streamcat_data, COMID, ElevWs, Precip8110Ws, Tmin8110Ws,
     Tmax8110Ws, Tmean8110Ws, RunoffWs, matches('^Pct[a-zA-z]+2011Ws$'),
     PermWs, RckDepWs, OmWs, WtDepWs, matches('^[a-zA-z0-9]_2008Ws$'), BFIWs,
@@ -285,8 +268,11 @@ streamcat_data = mutate(streamcat_data,
 sites = left_join(sites, streamcat_data, by='COMID')
 sites = sites[! duplicated(sites$site),]
 
+# sites = arrange(sites, region, site)
+# write.csv(sites, 'watershed_summary_data.csv', row.names=FALSE)
+#delete ID and regionsite cols
 
-#acquire MODIS data (this section not yet begun)
+#acquire MODIS data (this section incomplete)
 # VNP13A1
 mt_bands("MOD13Q1")
 subset1 <- mt_subset(product = "MOD13Q1",
@@ -314,155 +300,7 @@ subsets <- mt_batch_subset(dfx = dfx,
     end = "2004-02-01")
 
 
-#adjust catchment and watershed area for reach proportion
-sites$AreaSqKM = sites$AreaSqKM * sites$reach_proportion
-    #make a function to do this generically?
-
-
-
-
 #### SCRAPS ####
-
-#this works, but i replaced it with a more rudimentary function that
-#just acquires data and leaves postprocessing to the user
-merge_nhdplus_attr = function(df) {
-
-    message(paste0('The nhdR package downloads NHDPlusV2 components to ',
-        nhdR:::nhd_path(), '. Unfortunately this cannot be changed.',
-        ' Fortunately, each component need only be downloaded once.'))
-
-    out = data.frame()
-    no_nhd_sites_yet = TRUE
-    pre_nhd_site_counter = 0 #for prepending NA rows
-    for(i in 1:nrow(df)) {
-
-        print(i)
-        vpu = df$VPU[i]
-
-        if(is.na(vpu)) {
-            if(no_nhd_sites_yet){
-                pre_nhd_site_counter = pre_nhd_site_counter + 1
-            } else {
-                na_rows = as.data.frame(matrix(NA, nrow=1,
-                    ncol=ncol(out), dimnames=list(NULL, colnames(out))))
-                out = rbind(na_rows, out)
-            }
-            message(paste0('Skipping row ', i, '. Not associated with NHD.'))
-            next
-        } else {
-            no_nhd_sites_yet = FALSE
-        }
-
-        fl = nhd_plus_load(vpu=vpu, component='NHDSnapshot',
-            dsn='NHDFlowline', approve_all_dl=TRUE)
-        fl_etc = nhd_plus_load(vpu=vpu, component='NHDPlusAttributes',
-            dsn='PlusFlowlineVAA', approve_all_dl=TRUE)
-
-        colnames(fl)[colnames(fl) == 'ComID'] = 'COMID'
-        colnames(fl)[colnames(fl) == 'ReachCode'] = 'REACHCODE'
-        fl = fl[fl$COMID %in% df$COMID[i],]
-        # fl = left_join(fl, fl_etc[, c('ComID', 'ToMeas', 'FromMeas')],
-        fl = left_join(fl[, c('COMID', 'REACHCODE')], fl_etc,
-            by=c('COMID'='ComID'))
-        out = rbind(out, as.data.frame(fl))
-    }
-
-    if(nrow(out) > 0){
-        na_rows = as.data.frame(matrix(NA, nrow=pre_nhd_site_counter,
-            ncol=ncol(out), dimnames=list(NULL, colnames(out))))
-        out = rbind(na_rows, out)
-        out = cbind(df, out)
-    }
-
-    return(out)
-}
-sites = merge_nhdplus_attr(sites)
-
-#acquire streamcat catchment watershed characteristics (batch; incomplete)
-merge_streamcat_attr = function(df, storage_path){
-
-    out = data.frame()
-    no_nhd_sites_yet = TRUE
-    pre_nhd_site_counter = 0 #for prepending NA rows
-    for(i in 1:nrow(df)) {
-
-        print(i)
-        vpu = df$VPU[i]
-
-        if(is.na(vpu)) {
-            if(no_nhd_sites_yet){
-                pre_nhd_site_counter = pre_nhd_site_counter + 1
-            } else {
-                na_rows = as.data.frame(matrix(NA, nrow=1,
-                    ncol=ncol(out), dimnames=list(NULL, colnames(out))))
-                out = rbind(na_rows, out)
-            }
-            message(paste0('Skipping row ', i, '. Not associated with NHD.'))
-            next
-        } else {
-            no_nhd_sites_yet = FALSE
-        }
-
-
-        ####PULL STREAMCAT DATA BY STATE, STORE ON DISK
-        #APPEND TO GIANT 1000-COLUMN CSV? OR KEEP SEPARATE?
-        #PROBS THE LATTER
-        USstate = df$region[i]
-        ftpdir = paste0('ftp://newftp.epa.gov/EPADataCommons/ORD/',
-            'NHDPlusLandscapeAttributes/StreamCat/States/')
-        existing_files = list.files(storage_path)
-        if(USstate %in% ){
-        }
-        # table = 'PredictedBioCondition'
-
-        #get streamcat files associated with US state
-        url_list = getURL(ftpdir, dirlistonly=TRUE)
-        url_list = strsplit(url_list, split='\n')[[1]]
-        url_list = url_list[grep(USstate, url_list)]
-
-        #Loop through files on FTP, download, and append
-        for(i in 1:length(url_list)){
-            print(i)
-            temp = tempfile()
-            download.file(paste0(ftpdir, url_list[i]), temp)
-            #replace .zip with .csv in file name
-            csv_file = gsub('.zip', '.csv', url_list[i])
-            #read in csv
-            tmp_metric = read.csv(unz(temp, csv_file))
-            tmp_metric = read.csv(temp, csv_file)
-            #Append to final table
-            if(i == 1){
-                outdf = tmp_metric
-            }else{
-                outdf = rbind(outdf, tmp_metric)
-            }
-        }
-
-
-
-        fl = nhd_plus_load(vpu=vpu, component='NHDSnapshot',
-            dsn='NHDFlowline', approve_all_dl=TRUE)
-        fl_etc = nhd_plus_load(vpu=vpu, component='NHDPlusAttributes',
-            dsn='PlusFlowlineVAA', approve_all_dl=TRUE)
-
-        colnames(fl)[colnames(fl) == 'ComID'] = 'COMID'
-        colnames(fl)[colnames(fl) == 'ReachCode'] = 'REACHCODE'
-        fl = fl[fl$COMID %in% df$COMID[i],]
-        # fl = left_join(fl, fl_etc[, c('ComID', 'ToMeas', 'FromMeas')],
-        fl = left_join(fl[, c('COMID', 'REACHCODE')], fl_etc,
-            by=c('COMID'='ComID'))
-        out = rbind(out, as.data.frame(fl))
-    }
-
-    if(nrow(out) > 0){
-        na_rows = as.data.frame(matrix(NA, nrow=pre_nhd_site_counter,
-            ncol=ncol(out), dimnames=list(NULL, colnames(out))))
-        out = rbind(na_rows, out)
-        out = cbind(df, out)
-    }
-
-    return(out)
-}
 
 # storage_path='/home/mike/.local/share/StreamCat'
 
