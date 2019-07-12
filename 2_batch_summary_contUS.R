@@ -29,7 +29,7 @@ setwd('~/git/watershed_tools/')
 sites = read.csv('site_data.csv', stringsAsFactors=FALSE)
 # sites = readRDS('site_table_for_ws.rds')
 
-WSG84 = 4326 #EPSG code for coordinate reference system
+WGS84 = 4326 #EPSG code for coordinate reference system
 
 #COMID is the NHD identifier for any reach in the continental U.S.
 #add COMIDs to your site table.
@@ -42,7 +42,7 @@ comid_from_point = function(lat, long, CRS) {
 }
 
 sites$COMID = unlist(mapply(comid_from_point, sites$latitude,
-    sites$longitude, WSG84))
+    sites$longitude, WGS84))
 sites = sites[! is.na(sites$COMID),]
 
 #VPU == NHD vector processing unit. NHDPlusV2 data are downloaded per VPU.
