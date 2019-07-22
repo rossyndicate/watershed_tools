@@ -1,3 +1,6 @@
+#batch summarizing of watershed data for the continental USA
+#Mike Vlah (vlahm13@gmail.com)
+
 #use these tools to:
     #1. acquire NHDPlusV2 COMIDs based on lat/long
     #2. acquire NHDPlusV2 VPU IDs based on lat/long
