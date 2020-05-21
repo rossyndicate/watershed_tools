@@ -105,10 +105,9 @@ nhdplusv2_from_comid = function(VPU, COMID, component, DSN, quiet=FALSE) {
 nhdplusv2_bulk = function(site_df, nhdplusv2_sets, quiet=FALSE){
 
     nhdplus_data = data.frame()
+    if(any(is.na(site_df$COMID))) stop('you have missing COMIDs')
 
     for(j in 1:nrow(site_df)){
-        if(is.na(site_df$COMID[j])) next
-
         for(i in 1:length(setlist)){
             print(paste(j, nhdplusv2_sets[[i]]))
 
@@ -116,9 +115,9 @@ nhdplusv2_bulk = function(site_df, nhdplusv2_sets, quiet=FALSE){
                 row_base = try(nhdplusv2_from_comid(site_df$VPU[j],
                     site_df$COMID[j], names(setlist[i]), setlist[[i]],
                     quiet=quiet))
-                if(class(row_base)[1] == 'try-error'){
+                if('try-error' %in% class(row_base) || nrow(row_base) > 1){
                     initerr = TRUE
-                    print('init error')
+                    row_base = data.frame(COMID=site_df$COMID[j])
                 } else {
                     initerr = FALSE
                 }
@@ -126,13 +125,15 @@ nhdplusv2_bulk = function(site_df, nhdplusv2_sets, quiet=FALSE){
                 row_ext = try(nhdplusv2_from_comid(site_df$VPU[j],
                     site_df$COMID[j], names(setlist[i]), setlist[[i]],
                     quiet=quiet))
-                if(class(row_ext)[1] == 'try-error'){
-                    print('error')
-                    next
+                if(! 'try-error' %in% class(row_ext) && nrow(row_ext) == 1){
+                    row_base = left_join(row_base, row_ext)
                 }
-                row_base = left_join(row_base, row_ext)
             }
 
+        }
+
+        if(nrow(row_base) > 1){
+            row_base = data.frame(COMID=site_df$COMID[j])
         }
 
         nhdplus_data = rbind.fill(nhdplus_data, row_base)
@@ -178,33 +179,33 @@ streamcat_from_comid = function(USstate, COMID, dataset){
 streamcat_bulk = function(site_df, streamcat_sets){
 
     streamcat_data = data.frame()
+    if(any(is.na(site_df$COMID))) stop('you have missing COMIDs')
 
     for(j in 1:nrow(site_df)){
-        if(is.na(site_df$COMID[j])) next
-        initerr = FALSE
-
         for(i in 1:length(streamcat_sets)){
             print(paste(j, streamcat_sets[i]))
 
             if(i == 1 || initerr){
                 row_base = try(streamcat_from_comid(site_df$region[j],
                     site_df$COMID[j], streamcat_sets[i]))
-                if(class(row_base)[1] == 'try-error'){
+                if('try-error' %in% class(row_base) || nrow(row_base) > 1){
                     initerr = TRUE
-                    print('init error')
+                    row_base = data.frame(COMID=site_df$COMID[j])
                 } else {
                     initerr = FALSE
                 }
             } else {
                 row_ext = try(streamcat_from_comid(site_df$region[j],
                     site_df$COMID[j], streamcat_sets[i]))
-                if(class(row_ext)[1] == 'try-error'){
-                    print('error')
-                    next
+                if(! 'try-error' %in% class(row_ext) && nrow(row_ext) == 1){
+                    row_base = left_join(row_base, row_ext)
                 }
-                row_base = left_join(row_base, row_ext)
             }
 
+        }
+
+        if(nrow(row_base) > 1){
+            row_base = data.frame(COMID=site_df$COMID[j])
         }
 
         streamcat_data = rbind.fill(streamcat_data, row_base)
