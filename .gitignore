@@ -7,3 +7,4 @@ data/
 *.rds
 2_batch_summary.R
 sites_with_comid.csv
+/obsolete
