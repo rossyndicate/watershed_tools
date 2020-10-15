@@ -4,7 +4,7 @@
 delineate_watershed_from_point <- function(lat,
                                            long,
                                            crs,
-                                           dev_machine_status = 'n00b',
+                                           machine_status = 'n00b',
                                            write_dir,
                                            write_name,
                                            verbose = TRUE){
@@ -14,7 +14,7 @@ delineate_watershed_from_point <- function(lat,
     #long: numeric representing longitude of the pour point in decimal degrees
     #   (negative indicates west of prime meridian)
     #crs: numeric representing the coordinate reference system (e.g. 4326 for WSG84)
-    #dev_machine_status: either '1337', indicating that your machine has >= 16 GB
+    #machine_status: either '1337', indicating that your machine has >= 16 GB
     #   RAM, or 'n00b', indicating < 16 GB RAM. DEM resolution is chosen accordingly
     #write_dir: character. the directory in which to write output shapefile
     #write_name: character. the basename of the shapefile components to be written. i.e.
@@ -37,7 +37,7 @@ delineate_watershed_from_point <- function(lat,
     #       within snap_distance_m with highest flow accumulation, or "jenson",
     #       which snaps to the nearest flow line
     #   dem_resolution: passed to elevatr::get_elev_raster (z parameter).
-    #       depends on supplied dev_machine_status
+    #       depends on supplied machine_status
 
     #NOTE: in addition to the packages loaded below, you'll need mapview to
     #   visualize delineated watershed boundaries
@@ -201,7 +201,7 @@ delineate_watershed_from_point <- function(lat,
 
     #the workhorse
     delineate_watershed_apriori <- function(lat, long, crs,
-                                            dev_machine_status = 'n00b',
+                                            machine_status = 'n00b',
                                             verbose = FALSE){
 
         #lat: numeric representing latitude in decimal degrees
@@ -209,7 +209,7 @@ delineate_watershed_from_point <- function(lat,
         #long: numeric representing longitude in decimal degrees
         #   (negative indicates west of prime meridian)
         #crs: numeric representing the coordinate reference system (e.g. WSG84)
-        #dev_machine_status: either '1337', indicating that your machine has >= 16 GB
+        #machine_status: either '1337', indicating that your machine has >= 16 GB
         #   RAM, or 'n00b', indicating < 16 GB RAM. DEM resolution is chosen accordingly
         #verbose: logical. determines the amount of informative messaging during run
 
@@ -247,7 +247,7 @@ delineate_watershed_from_point <- function(lat,
 
             while_loop_begin <- FALSE
 
-            if(dev_machine_status == '1337'){
+            if(machine_status == '1337'){
                 dem_resolution <- case_when(
                     buffer_radius <= 1e4 ~ 12,
                     buffer_radius == 1e5 ~ 11,
@@ -256,7 +256,7 @@ delineate_watershed_from_point <- function(lat,
                     buffer_radius == 1e8 ~ 6,
                     buffer_radius == 1e9 ~ 4,
                     buffer_radius >= 1e10 ~ 2)
-            } else if(dev_machine_status == 'n00b'){
+            } else if(machine_status == 'n00b'){
                 dem_resolution <- case_when(
                     buffer_radius <= 1e4 ~ 10,
                     buffer_radius == 1e5 ~ 8,
@@ -265,7 +265,7 @@ delineate_watershed_from_point <- function(lat,
                     buffer_radius == 1e8 ~ 2,
                     buffer_radius >= 1e9 ~ 1)
             } else {
-                stop('dev_machine_status must be either "1337" or "n00b"')
+                stop('machine_status must be either "1337" or "n00b"')
             }
 
             site_buf <- sf::st_buffer(x = site,
@@ -410,7 +410,7 @@ delineate_watershed_from_point <- function(lat,
         lat = lat,
         long = long,
         crs = crs,
-        dev_machine_status = dev_machine_status,
+        machine_status = machine_status,
         verbose = verbose))
 
     files_to_inspect <- list.files(path = inspection_dir,
