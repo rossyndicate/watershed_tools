@@ -1,4 +1,5 @@
-#documentation and helper functions included in function definition
+#documentation and helper functions are included in the function definition below.
+#if you're in Rstudio, collapse the function with Alt+o. there's an example included at the bottom.
 
 delineate_watershed_from_point <- function(lat,
                                            long,
