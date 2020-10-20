@@ -19,9 +19,9 @@
 library(stringr)
 library(dplyr)
 library(plyr)
-# devtools::install_github("USGS-R/nhdplusTools")
+# remotes::install_github("USGS-R/nhdplusTools")
 library(nhdplusTools)
-# devtools::install_github("jsta/nhdR")
+# remotes::install_github("jsta/nhdR")
 library(nhdR)
 library(RCurl)
 library(sf)
@@ -29,7 +29,9 @@ library(sf)
 
 # 1. setup and helper functions ####
 
-setwd('~/Desktop/untracked/watershed_geohax/')
+#set your working directory to the location of your site data file.
+#   site data must include latitude and longitude columns (decimal degrees)
+# setwd('~/Desktop/untracked/watershed_geohax/')
 sites = read.csv('site_data.csv', stringsAsFactors=FALSE)
 WGS84 = 4326 #EPSG code for coordinate reference system
 
