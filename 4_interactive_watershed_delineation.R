@@ -78,6 +78,10 @@ delineate_watershed_from_point <- function(lat,
             stop('new_name_vec must have the same length as shp_files')
         }
 
+        dir.create(to_dir,
+                   showWarnings = FALSE,
+                   recursive = TRUE)
+
         for(i in 1:length(shp_files)){
 
             shapefile_base <- strsplit(shp_files[i], '\\.shp')[[1]]
@@ -366,6 +370,7 @@ delineate_watershed_from_point <- function(lat,
                     buffer_radius_new <- buffer_radius * 10
                     dem_coverage_insufficient <- TRUE
                 } else {
+                    dem_coverage_insufficient <- FALSE
                     buffer_radius_new <- buffer_radius
 
                     #write and record temp files for the technician to visually inspect
