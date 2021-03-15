@@ -46,6 +46,15 @@ delineate_watershed_from_point <- function(lat,
     #       which snaps to the nearest flow line
     #   dem_resolution: passed to elevatr::get_elev_raster (z parameter).
     #       depends on supplied machine_status
+    #   flat_increment: see whitebox::wbt_breach_depressions or
+    #       whitebox::wbt_breach_depressions_least_cost
+    #   breach_method: string. Either 'basic', indicating that
+    #       whitebox::wbt_breach_depressions was used, or 'lc', indicating
+    #       whitebox::wbt_breach_depressions_least_cost (which less readily
+    #       alters the DEM)
+    #   burn_streams: TRUE or FALSE, indicating whether
+    #       whitebox::wbt_burn_streams_at_roads and whitebox::wbt_fill_burn were
+    #       used on the DEM
 
     sm <- suppressMessages
     sw <- suppressWarnings
