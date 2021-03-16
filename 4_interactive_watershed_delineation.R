@@ -1,16 +1,19 @@
 #documentation and helper functions are included in the function definition below.
-#if you're in Rstudio, collapse the function with Alt+o.
-#there's a demo call included at the bottom.
+#If you're in Rstudio, collapse the function with Alt+o (Windows/Linux) or Cmd+Opt+o (Mac).
+#There's a demo call included at the bottom.
+#Spaces in write_dir may cause errors on Windows.
 
 library(tidyverse)
 library(glue)
 library(sf)
 library(elevatr)
 library(raster)
-library(whitebox)
+library(whitebox) #this can't be installed from CRAN. google "install whitebox R"
 library(terra)
 library(mapview)
 library(osmdata) #only needed if you want to burn streams into the DEM
+#NOTE: you may also need to install the lwgeom, rgdal, and e1071 packages.
+#   (you'll be notified in error messages if so)
 
 delineate_watershed_from_point <- function(lat,
                                            long,
@@ -393,6 +396,10 @@ delineate_watershed_from_point <- function(lat,
 
             if(inherits(results, 'try-error')){
 
+                if(attempt_i == max_attempts){
+                    stop(attr(results, 'condition'))
+                }
+
                 backoff <- runif(n = 1,
                                  min = 0,
                                  max = 2^attempt_i - 1)
@@ -603,7 +610,8 @@ delineate_watershed_from_point <- function(lat,
                                    sep = ': ',
                                    collapse = '\n')
 
-            helper_code <- glue('{id}.\nmapview::mapview(sf::st_read("{wd}/{f}")) + ',
+            helper_code <- glue('{id}.\nmapview::mapviewOptions(fgb = FALSE);',
+                                'mapview::mapview(sf::st_read("{wd}/{f}")) + ',
                                 'mapview::mapview(sf::st_read("{pf}"))',
                                 id = 1:length(files_to_inspect),
                                 wd = inspection_dir,
@@ -612,7 +620,7 @@ delineate_watershed_from_point <- function(lat,
                 paste(collapse = '\n\n')
 
             msg <- glue('Visually inspect the watershed boundary candidate shapefiles ',
-                        'by pasting the mapview lines below into R.\n\n{hc}\n\n',
+                        'by pasting the mapview lines below into a separate instance of R.\n\n{hc}\n\n',
                         'Enter the number corresponding to the ',
                         'one that looks most legit, or select one or more tuning ',
                         'options (e.g. "SBRI" without quotes). You usually won\'t ',
