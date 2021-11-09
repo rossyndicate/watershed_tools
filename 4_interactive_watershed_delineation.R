@@ -1,3 +1,10 @@
+#2021-04-01
+#mike vlah
+#vlahm13@gmail.com
+
+#if this can't delineate your watershed, email me! there are heaps of updates
+#that i haven't yet incorporated into this version of the tool
+
 #documentation and helper functions are included in the function definition below.
 #If you're in Rstudio, collapse the function with Alt+o (Windows/Linux) or Cmd+Opt+o (Mac).
 #There's a demo call included at the bottom.
@@ -580,156 +587,140 @@ delineate_watershed_from_point <- function(lat,
                          delete_dsn = TRUE,
                          quiet = TRUE)
 
-        #if only one delineation, write it into macrosheds storage
-        if(length(files_to_inspect) == 1){
+        nshapes <- length(files_to_inspect)
 
-            selection <- files_to_inspect[1]
+        wb_selections <- paste(paste0('[',
+                                      c(1:nshapes, 'S', 'B', 'R', 'I', 'a'),
+                                      ']'),
+                               c(files_to_inspect,
+                                 'Burn streams into the DEM (may handle road-stream intersections)',
+                                 'Use more aggressive breaching method',
+                                 'Select DEM resolution',
+                                 'Set flat_increment',
+                                 # 'Next (skip this one for now)',
+                                 'Abort delineation'),
+                               sep = ': ',
+                               collapse = '\n')
 
-            move_shapefiles(shp_files = selection,
-                            from_dir = inspection_dir,
-                            to_dir = write_dir)
+        helper_code <- glue('{id}.\nmapview::mapviewOptions(fgb = FALSE);',
+                            'mapview::mapview(sf::st_read("{wd}/{f}")) + ',
+                            'mapview::mapview(sf::st_read("{pf}"))',
+                            id = 1:length(files_to_inspect),
+                            wd = inspection_dir,
+                            f = files_to_inspect,
+                            pf = temp_point) %>%
+            paste(collapse = '\n\n')
 
-            message(glue('Delineation successful. Shapefile written to ',
-                         write_dir))
+        msg <- glue('Visually inspect the watershed boundary candidate shapefiles ',
+                    'by pasting the mapview lines below into a separate instance of R.\n\n{hc}\n\n',
+                    'Enter the number corresponding to the ',
+                    'one that looks most legit, or select one or more tuning ',
+                    'options (e.g. "SBRI" without quotes). You usually won\'t ',
+                    'need to tune anything. If you aren\'t ',
+                    'sure which delineation is correct, get a site manager to verify:\n',
+                    'request_site_manager_verification(type=\'wb delin\', ',
+                    'network, domain) [function not yet built]\n\nChoices:\n{sel}\n\nEnter choice(s) here > ',
+                    hc = helper_code,
+                    sel = wb_selections)
+        # td = inspection_dir)
 
-            #otherwise, technician must inspect all delineations and choose one
-        } else {
+        resp <- get_response_mchar(
+            msg = msg,
+            possible_resps = paste(c(1:nshapes, 'S', 'B', 'R', 'I', 'a'),
+                                   collapse = ''),
+            allow_alphanumeric_response = FALSE)
+        #
+        # if('n' %in% resp){
+        #     unlink(write_dir,
+        #            recursive = TRUE)
+        #     print(glue('Moving on. You haven\'t seen the last of {s}!',
+        #                s = site_name))
+        #     return(1)
+        # }
 
-            nshapes <- length(files_to_inspect)
-
-            wb_selections <- paste(paste0('[',
-                                          c(1:nshapes, 'S', 'B', 'R', 'I', 'a'),
-                                          ']'),
-                                   c(files_to_inspect,
-                                     'Burn streams into the DEM (may handle road-stream intersections)',
-                                     'Use more aggressive breaching method',
-                                     'Select DEM resolution',
-                                     'Set flat_increment',
-                                     # 'Next (skip this one for now)',
-                                     'Abort delineation'),
-                                   sep = ': ',
-                                   collapse = '\n')
-
-            helper_code <- glue('{id}.\nmapview::mapviewOptions(fgb = FALSE);',
-                                'mapview::mapview(sf::st_read("{wd}/{f}")) + ',
-                                'mapview::mapview(sf::st_read("{pf}"))',
-                                id = 1:length(files_to_inspect),
-                                wd = inspection_dir,
-                                f = files_to_inspect,
-                                pf = temp_point) %>%
-                paste(collapse = '\n\n')
-
-            msg <- glue('Visually inspect the watershed boundary candidate shapefiles ',
-                        'by pasting the mapview lines below into a separate instance of R.\n\n{hc}\n\n',
-                        'Enter the number corresponding to the ',
-                        'one that looks most legit, or select one or more tuning ',
-                        'options (e.g. "SBRI" without quotes). You usually won\'t ',
-                        'need to tune anything. If you aren\'t ',
-                        'sure which delineation is correct, get a site manager to verify:\n',
-                        'request_site_manager_verification(type=\'wb delin\', ',
-                        'network, domain) [function not yet built]\n\nChoices:\n{sel}\n\nEnter choice(s) here > ',
-                        hc = helper_code,
-                        sel = wb_selections)
-            # td = inspection_dir)
-
-            resp <- get_response_mchar(
-                msg = msg,
-                possible_resps = paste(c(1:nshapes, 'S', 'B', 'R', 'I', 'a'),
-                                       collapse = ''),
-                allow_alphanumeric_response = FALSE)
-            #
-            # if('n' %in% resp){
-            #     unlink(write_dir,
-            #            recursive = TRUE)
-            #     print(glue('Moving on. You haven\'t seen the last of {s}!',
-            #                s = site_name))
-            #     return(1)
-            # }
-
-            if('a' %in% resp){
-                unlink(write_dir,
-                       recursive = TRUE)
-                print(glue('Aborted. Any completed delineations have been saved.'))
-                return(2)
-            }
-
-            if('S' %in% resp){
-                burn_streams <- TRUE
-            } else {
-                burn_streams <- FALSE
-            }
-
-            if('B' %in% resp){
-                breach_method <- 'basic'
-            } else {
-                breach_method <- 'lc'
-            }
-
-            if('R' %in% resp){
-                dem_resolution <- get_response_mchar(
-                    msg = paste0('Choose DEM resolution between 1 (low) and 14 (high)',
-                                 ' to pass to elevatr::get_elev_raster. For tiny ',
-                                 'watersheds, use 12-13. For giant ones, use 8-9.\n\n',
-                                 'Enter choice here > '),
-                    possible_resps = paste(1:14))
-                dem_resolution <- as.numeric(dem_resolution)
-            }
-
-            if('I' %in% resp){
-
-                bm <- ifelse(breach_method == 'basic',
-                             'whitebox::wbt_breach_depressions',
-                             'whitebox::wbt_breach_depressions_least_cost')
-
-                new_options <- paste(paste0('[',
-                                            c('S', 'M', 'L'),
-                                            ']'),
-                                     c('0.001', '0.01', '0.1'),
-                                     sep = ': ',
-                                     collapse = '\n')
-
-                resp2 <- get_response_1char(
-                    msg = glue('Pick the size of the elevation increment to pass to ',
-                               bm, '.\n\n', new_options, '\n\nEnter choice here > '),
-                    possible_chars = c('S', 'M', 'L'))
-
-                flat_increment <- switch(resp2,
-                                         S = 0.001,
-                                         M = 0.01,
-                                         L = 0.1)
-            }
-
-            if(! grepl('[0-9]', resp)){
-
-                selection <- delineate_watershed_apriori_recurse(
-                    lat = lat,
-                    long = long,
-                    crs = crs,
-                    site_name = site_name,
-                    dem_resolution = dem_resolution,
-                    flat_increment = flat_increment,
-                    breach_method = breach_method,
-                    burn_streams = burn_streams,
-                    scratch_dir = scratch_dir,
-                    write_dir = write_dir,
-                    dev_machine_status = dev_machine_status,
-                    verbose = verbose)
-
-                return(selection)
-            }
-
-            selection <- files_to_inspect[as.numeric(resp)]
-
-            move_shapefiles(shp_files = selection,
-                            from_dir = inspection_dir,
-                            to_dir = write_dir,
-                            new_name_vec = site_name)
-
-            message(glue('Selection {s}:\n\t{sel}\nwas written to:\n\t{sdr}',
-                         s = resp,
-                         sel = selection,
-                         sdr = write_dir))
+        if('a' %in% resp){
+            unlink(write_dir,
+                   recursive = TRUE)
+            print(glue('Aborted. Any completed delineations have been saved.'))
+            return(2)
         }
+
+        if('S' %in% resp){
+            burn_streams <- TRUE
+        } else {
+            burn_streams <- FALSE
+        }
+
+        if('B' %in% resp){
+            breach_method <- 'basic'
+        } else {
+            breach_method <- 'lc'
+        }
+
+        if('R' %in% resp){
+            dem_resolution <- get_response_mchar(
+                msg = paste0('Choose DEM resolution between 1 (low) and 14 (high)',
+                             ' to pass to elevatr::get_elev_raster. For tiny ',
+                             'watersheds, use 12-13. For giant ones, use 8-9.\n\n',
+                             'Enter choice here > '),
+                possible_resps = paste(1:14))
+            dem_resolution <- as.numeric(dem_resolution)
+        }
+
+        if('I' %in% resp){
+
+            bm <- ifelse(breach_method == 'basic',
+                         'whitebox::wbt_breach_depressions',
+                         'whitebox::wbt_breach_depressions_least_cost')
+
+            new_options <- paste(paste0('[',
+                                        c('S', 'M', 'L'),
+                                        ']'),
+                                 c('0.001', '0.01', '0.1'),
+                                 sep = ': ',
+                                 collapse = '\n')
+
+            resp2 <- get_response_1char(
+                msg = glue('Pick the size of the elevation increment to pass to ',
+                           bm, '.\n\n', new_options, '\n\nEnter choice here > '),
+                possible_chars = c('S', 'M', 'L'))
+
+            flat_increment <- switch(resp2,
+                                     S = 0.001,
+                                     M = 0.01,
+                                     L = 0.1)
+        }
+
+        if(! grepl('[0-9]', resp)){
+
+            selection <- delineate_watershed_apriori_recurse(
+                lat = lat,
+                long = long,
+                crs = crs,
+                site_name = site_name,
+                dem_resolution = dem_resolution,
+                flat_increment = flat_increment,
+                breach_method = breach_method,
+                burn_streams = burn_streams,
+                scratch_dir = scratch_dir,
+                write_dir = write_dir,
+                dev_machine_status = dev_machine_status,
+                verbose = verbose)
+
+            return(selection)
+        }
+
+        selection <- files_to_inspect[as.numeric(resp)]
+
+        move_shapefiles(shp_files = selection,
+                        from_dir = inspection_dir,
+                        to_dir = write_dir,
+                        new_name_vec = site_name)
+
+        message(glue('Selection {s}:\n\t{sel}\nwas written to:\n\t{sdr}',
+                     s = resp,
+                     sel = selection,
+                     sdr = write_dir))
 
         return(selection)
     }
@@ -1001,9 +992,10 @@ delineate_watershed_from_point <- function(lat,
                         sf::st_as_sf() %>%
                         sf::st_buffer(dist = 0.1) %>%
                         sf::st_union() %>%
-                        sf::st_as_sf()#again? ugh.
+                        sf::st_as_sf() #again? ugh.
 
-                    wb_sf <- sf::st_transform(wb_sf, 4326) #EPSG for WGS84
+                    wb_sf <- sf::st_transform(wb_sf, 4326) %>% #EPSG for WGS84
+                        st_make_valid(wb_sf)
 
                     ws_area_ha <- as.numeric(sf::st_area(wb_sf)) / 10000
 
@@ -1097,5 +1089,5 @@ delineate_watershed_from_point <- function(lat,
 deets <- delineate_watershed_from_point(lat = 44.21013,
                                         long = -122.2571,
                                         crs = 4326,
-                                        write_dir = '~/some_path',
+                                        write_dir = '/some/path',
                                         write_name = 'ultimate_watershed')
