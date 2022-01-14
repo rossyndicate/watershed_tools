@@ -1086,8 +1086,9 @@ delineate_watershed_from_point <- function(lat,
     return(deets)
 }
 
-deets <- delineate_watershed_from_point(lat = 44.21013,
-                                        long = -122.2571,
-                                        crs = 4326,
-                                        write_dir = '/some/path',
-                                        write_name = 'ultimate_watershed')
+#example
+# deets <- delineate_watershed_from_point(lat = 44.21013,
+#                                         long = -122.2571,
+#                                         crs = 4326,
+#                                         write_dir = '/some/path',
+#                                         write_name = 'ultimate_watershed')
