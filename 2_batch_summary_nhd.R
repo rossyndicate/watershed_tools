@@ -1,5 +1,6 @@
 #batch summarizing of watershed data for the continental USA
 #Mike Vlah (vlahm13@gmail.com)
+#updated 2022-07-28
 
 #use these tools to:
     #1. acquire NHDPlusV2 COMIDs based on lat/long
@@ -16,24 +17,42 @@
 #NOTE: these tools necessarily download a lot of large datasets and store them
 #in memory. keep an eye on your usage.
 
-library(stringr)
-library(dplyr)
+
 library(plyr)
-# remotes::install_github("USGS-R/nhdplusTools")
+library(tidyverse)
 library(nhdplusTools)
-# remotes::install_github("jsta/nhdR")
 library(nhdR)
 library(RCurl)
 library(sf)
-# library(MODISTools)
+library(mapview)
+
+mv = mapview::mapview
+
+options(timeout = 5000)
+
+#establish save location for NHD HR files (some place you don't mind accumulating a few gigs).
+#you could make it a temporary directory.
+nhd_hr_dir = '~/git/macrosheds/data_acquisition/data/general/nhd_hr'
+
+#this is where maps of site, NHDPlusV2 flowlines, NHD HR flowlines will be saved
+mapview_save_dir <- '~/git/charlotte_observer/poultry_farms/out/monitoring_location_maps'
 
 # 1. setup and helper functions ####
 
-#set your working directory to the location of your site data file.
-#   site data must include latitude and longitude columns (decimal degrees)
-# setwd('~/Desktop/untracked/watershed_geohax/')
-sites = read.csv('site_data.csv', stringsAsFactors=FALSE)
 WGS84 = 4326 #EPSG code for coordinate reference system
+
+#create site data for example run
+sites = tribble(
+    ~region, ~sitecode, ~sitename, ~latitude, ~longitude,
+    'AZ',     'SC',                   'Sycamore Creek',  33.7532, -111.5060,
+    'CT',     'Unio', 'Farmington River at Unionville',  41.7555,  -72.8870,
+    'MD',     'POBR',                    'Pond Branch',  39.4803,  -76.6875,
+    'NC',     'UEno',                 'East Eno River',  36.1359,  -79.1588,
+    'VT',     'Pass',               'Passumpsic River',  44.3656,  -72.0393,
+    'WI',     'BRW',                   'Brewery Creek',  43.1250,  -89.6350
+)
+# ) %>% st_as_sf(coords = c('longitude', 'latitude'), crs = WGS84)
+
 
 comid_from_point = function(lat, long, CRS) {
     pt = sf::st_point(c(long, lat))
@@ -50,6 +69,36 @@ vpu_from_point = function(lat, long, CRS) {
     return(VPU)
 }
 
+get_nearby_nhd <- function(lat, long, CRS, buf_dist = 1000){
+
+    site = sf::st_point(c(long, lat)) %>% sf::st_sfc(crs = CRS)
+
+    site_buf <- sf::st_buffer(x = site,
+                              dist = buf_dist)
+    site_box <- st_bbox(site_buf)
+
+    subset_file <- tempfile(fileext = '.gpkg')
+
+    subset <- try({
+        nhdplusTools::subset_nhdplus(bbox = site_box,
+                                     output_file = subset_file,
+                                     nhdplus_data = 'download',
+                                     return_data = TRUE,
+                                     overwrite = FALSE,
+                                     out_prj = 4326) %>%
+            suppressMessages()
+    }, silent = TRUE)
+
+    if(inherits(subset, 'try-error') || ! length(subset)){# || nrow(subset[[1]]) < 2){
+        print('incrementing buffer distance by 500')
+        buf_dist <- buf_dist + 500
+        if(buf_dist > 20000) stop('no streamlines within 20000 meter radius?')
+        get_nearby_nhd(lat = lat, long = long, CRS = CRS, buf_dist = buf_dist)
+    } else {
+        return(list(nhd_subset = subset, bbox = site_box))
+    }
+}
+
 #this calculates how far along a reach any given point falls. That way when we pull in
 #watershed summary data for a reach, we can adjust it according to how much
 #of the total upstream area actually contributes to the point in question.
@@ -62,6 +111,14 @@ calc_reach_prop = function(VPU, COMID, lat, long, CRS, quiet=FALSE){
             ' Fortunately, each component need only be downloaded once.'))
     }
 
+    # url <- nhdR:::get_plus_remotepath(14, component = 'NHDSnapshot')
+    # cc = get_nhdplus(comid = COMID)
+    # nhdplusTools::download_nhdplusv2(outdir = '~/Desktop/untracked/nhdplusv2',
+    #                                  url = 'https://edap-ow-data-commons.s3.amazonaws.com/NHDPlusV21/Data/NHDPlusSA/NHDPlus03N/NHDPlusV21_SA_03N_03a_CatSeed_01.7z')
+    # nhdplusTools::download_nhdplusv2(outdir = '~/Desktop/untracked/nhdplusv2')
+    # nhd_plus_get(vpu = VPU, "NHDSnapshot")
+    # nhd_plus_get(vpu = VPU, component = "NHDSnapshot", force_unzip = TRUE)
+    # nhd_plus_get(vpu = VPU, component = "NHDPlusAttributes", force_unzip = TRUE)
     fl = nhdR::nhd_plus_load(vpu=VPU, component='NHDSnapshot',
         dsn='NHDFlowline', approve_all_dl=TRUE)
     fl_etc = nhdR::nhd_plus_load(vpu=VPU, component='NHDPlusAttributes',
@@ -220,7 +277,7 @@ streamcat_bulk = function(site_df, streamcat_sets){
 # 2. get NHDPlusV2 data ####
 
 #COMID is the NHD identifier for any reach in the continental U.S.
-#add COMIDs to your site table. If this doesn't work, update nhdplusTools
+#add COMIDs to your site table. If this doesn't work, try updating nhdplusTools
 sites$COMID = unlist(mapply(comid_from_point, sites$latitude,
     sites$longitude, WGS84))
 sites = sites[! is.na(sites$COMID),]
@@ -230,8 +287,88 @@ sites = sites[! is.na(sites$COMID),]
 sites$VPU = unlist(mapply(vpu_from_point, sites$latitude,
     sites$longitude, WGS84))
 
-sites$reach_proportion = unlist(mapply(calc_reach_prop, sites$VPU, sites$COMID,
-    sites$latitude, sites$longitude, WGS84, quiet=TRUE))
+#loop through sites and verify that they're actually on NHDPlusV2 flowlines,
+#rather than NHD HR flowlines, for which we don't yet have StreamCat summaries.
+#this loop will also calculate reach proportions
+sites$reach_proportion = NA
+sites$nhd_network = NA
+
+prev_huc4 <- 'none'
+for(i in seq_len(nrow(sites))){
+
+    print('---')
+    site <- sites[i, ]
+    print(paste0(i, ': ', site$sitecode))
+
+    nhdchunk = suppressWarnings(get_nearby_nhd(
+        lat = site$latitude,
+        long = site$longitude,
+        CRS = WGS84))
+
+    subset <- nhdchunk$nhd_subset
+    site_box <- nhdchunk$bbox
+
+    site_sf <- sf::st_point(c(site$longitude, site$latitude)) %>%
+        sf::st_sfc(crs = WGS84)
+
+    huc12 <- get_huc12(site_sf)
+    print(paste('HUC12:', huc12$huc12))
+    huc4 <- substr(huc12$huc12, 1, 4)[1]
+    nhdplusTools::download_nhdplushr(nhd_hr_dir, hu_list = huc4) %>% invisible()
+
+    if(huc4 != prev_huc4){
+
+        HRflowlines <- nhdplusTools::get_nhdplushr(
+            file.path(nhd_hr_dir, substr(huc4, 1, 2)),
+            file.path(nhd_hr_dir, paste0(huc4, '.gpkg')),
+            layers = 'NHDFlowline',
+            proj = 4326
+        )$NHDFlowline
+
+    } else {
+        print('using previous NHD HR HUC')
+    }
+
+    prev_huc4 <- huc4
+
+    NHD_HR <- suppressWarnings(sf::st_crop(HRflowlines, site_box))
+
+    NHDPlus <- subset$NHDFlowline_Network
+    # catchments <- subset$CatchmentSP
+    # upstream <- nhdplusTools::get_UT(flowlines, comid)
+
+    x = suppressWarnings(nhdplusTools::get_flowline_index(NHDPlus, points=site_sf))
+    sites$reach_proportion[i] = 1 - x$REACH_meas / 100 #0=upstream end; 1=downstream end
+
+    dist_to_nearest_NHDPlus_flowline <- min(st_distance(NHDPlus, site_sf))
+    print(paste('Dist to NHDPlus:', round(dist_to_nearest_NHDPlus_flowline, 2), 'm'))
+    dist_to_nearest_NHDHR_flowline <- min(st_distance(NHD_HR, site_sf))
+    print(paste('Dist to NHD_HR:', round(dist_to_nearest_NHDHR_flowline, 2), 'm'))
+
+    xx = mv(NHD_HR, color = 'darkslategray3') + mv(NHDPlus, color='deepskyblue4') + mv(site_sf, color='red')
+    mapview_save_path <- file.path(mapview_save_dir, paste0(site$sitecode, '.html'))
+    mapview::mapshot(xx, url = mapview_save_path)
+    print(paste('map saved to', mapview_save_path))
+    print(xx)
+
+    x <- readline(cat('This point is on: [A] an NHDPlus flowline, [B] an NHD_HR flowline (but not NHDPlus), or [C] neither >\n'))
+
+    if(x == 'A'){
+        sites[i, 'nhd_network'] <- 'NHDPlusV2'
+    } else if(x == 'B'){
+        sites[i, 'COMID'] <- NA
+        sites[i, 'nhd_network'] <- 'NHD HR'
+    } else if(x == 'C'){
+        sites[i, 'COMID'] <- NA
+        sites[i, 'nhd_network'] <- 'too small even for HR'
+    } else {
+        stop(paste("'A', 'B', or 'C'"))
+    }
+}
+
+#usef to calculate reach proportion naively like this
+# sites$reach_proportion = unlist(mapply(calc_reach_prop, sites$VPU, sites$COMID,
+#     sites$latitude, sites$longitude, WGS84, quiet=TRUE))
 
 #construct list of DSN=component pairs to acquire. see NHDPlus docs for more.
 setlist = list('NHDPlusAttributes'='PlusFlowlineVAA',
@@ -285,53 +422,3 @@ sites = sites[! duplicated(sites$sitecode),]
 #save yer data
 sites = arrange(sites, region, sitecode)
 write.csv(sites, 'watershed_summary_data.csv', row.names=FALSE)
-
-
-# 4. get MODIS data (this section incomplete) ####
-# VNP13A1
-mt_bands("MOD13Q1")
-subset1 = mt_subset(product = "MOD13Q1",
-    lat = 40,
-    lon = -110,
-    band = "250m_16_days_NDVI",
-    start = "2004-01-01",
-    end = "2004-02-01",
-    km_lr = 10,
-    km_ab = 10,
-    site_name = "testsite",
-    internal = TRUE,
-    progress = FALSE)
-
-dfx = data.frame("site_name" = paste("test",1:2))
-dfx$lat = 40
-dfx$lon = -110
-
-# test batch download
-subsets = mt_batch_subset(dfx = dfx,
-    product = "MOD11A2",
-    band = "LST_Day_1km",
-    internal = TRUE,
-    start = "2004-01-01",
-    end = "2004-02-01")
-
-
-#### SCRAPS ####
-
-# storage_path='/home/mike/.local/share/StreamCat'
-
-# subset = subset %>%
-#     st_as_sf(coords=c('longitude', 'latitude'), crs=4326) %>%
-#     st_transform(PROJ4)
-#
-# #get DEM, 14 is highest res, smallest area; 1 is lowest res, broadest area
-# dem = get_elev_raster(subset, z=8)
-# mapview(dem) + mapview(subset)
-#
-# devtools::install_github("jsta/nhdR")
-#
-# #convert to spatial object and project from WGS 84
-# # subset = subset %>%
-# #     st_as_sf(coords=c('longitude','latitude'), crs=4326) %>%
-# #     st_transform(PROJ4)
-#
-
