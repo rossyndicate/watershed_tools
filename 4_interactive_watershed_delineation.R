@@ -631,16 +631,12 @@ delineate_watershed_from_point <- function(lat,
             allow_alphanumeric_response = FALSE)
         #
         # if('n' %in% resp){
-        #     unlink(write_dir,
-        #            recursive = TRUE)
         #     print(glue('Moving on. You haven\'t seen the last of {s}!',
         #                s = site_name))
         #     return(1)
         # }
 
         if('a' %in% resp){
-            unlink(write_dir,
-                   recursive = TRUE)
             print(glue('Aborted. Any completed delineations have been saved.'))
             return(2)
         }
